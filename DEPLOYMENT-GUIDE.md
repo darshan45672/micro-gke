@@ -567,7 +567,10 @@ Use the provided script for automated deployment:
 # Make script executable
 chmod +x deploy-to-gke.sh
 
-# Run deployment
+# Verify script permissions
+ls -lh deploy-to-gke.sh
+
+# Run deployment with your project ID
 PROJECT_ID="your-project-id" ./deploy-to-gke.sh
 ```
 
@@ -581,6 +584,51 @@ The script automatically:
 - ✅ Generates deployment manifests
 - ✅ Deploys applications
 - ✅ Retrieves LoadBalancer IPs
+
+### Step 11: Verify Project Setup (Troubleshooting)
+
+If you encounter project ID or permission errors, verify your setup:
+
+```bash
+# List all available projects
+gcloud projects list
+
+# Find your project and copy the PROJECT_ID (not PROJECT_NUMBER)
+# Set the correct project
+export PROJECT_ID="your-actual-project-id"
+echo "Project ID set to: $PROJECT_ID"
+
+# Configure gcloud to use this project
+gcloud config set project $PROJECT_ID
+
+# Verify project is active
+gcloud projects describe $PROJECT_ID --format="table(projectId,name,projectNumber,lifecycleState)"
+
+# Verify billing is enabled (REQUIRED for GKE)
+gcloud billing projects describe $PROJECT_ID
+```
+
+**Expected Output:**
+```
+billingEnabled: true
+billingAccountName: billingAccounts/XXXXXX-XXXXXX-XXXXXX
+```
+
+**Common Issues:**
+
+1. **Wrong Project ID**: Make sure you copy the `PROJECT_ID` column, not `PROJECT_NUMBER`
+   - ✅ Correct: `micro-gke-demo-1765441052`
+   - ❌ Wrong: `804726184818` (this is project number)
+
+2. **SSL Certificate Error**: If you see `SSL: CERTIFICATE_VERIFY_FAILED`
+   - You're behind a corporate proxy/firewall
+   - Contact your IT department or use personal network
+   - Configure custom CA: `gcloud config set core/custom_ca_certs_file /path/to/ca_certs`
+
+3. **Permission Denied**: Project doesn't exist or you lack permissions
+   - Verify project ID is correct
+   - Check you have Owner or Editor role
+   - Ensure you're logged in with correct account: `gcloud auth list`
 
 ---
 
@@ -689,29 +737,147 @@ kubectl get pods
    gcloud auth configure-docker ${REGION}-docker.pkg.dev
    ```
 
-3. **Exec Format Error**
+3. **Exec Format Error** (Most Common Issue)
    ```bash
-   # Cause: Wrong architecture (ARM64 vs AMD64)
-   # Solution: Rebuild with --platform linux/amd64
-   podman build --platform linux/amd64 -t app:latest .
+   # Check pod status
+   kubectl get pods
+   
+   # If you see CrashLoopBackOff, check logs
+   kubectl logs -l app=mf1-nextjs --tail=20
+   kubectl logs -l app=mf2-vuejs --tail=20
+   
+   # If you see "exec format error", you have architecture mismatch
+   # Error message:
+   # exec /usr/local/bin/docker-entrypoint.sh: exec format error
+   # exec /docker-entrypoint.sh: exec format error
+   ```
+   
+   **Root Cause**: Built ARM64 images on Apple Silicon Mac, but GKE runs AMD64 nodes
+   
+   **Solution**: Delete failed deployments and rebuild for AMD64
+   ```bash
+   # Step 1: Delete failed deployments
+   kubectl delete -f /tmp/gke-mf1-deployment.yaml -f /tmp/gke-mf2-deployment.yaml
+   
+   # Step 2: Rebuild with correct architecture
+   PROJECT_ID="your-project-id"
+   REGION="us-central1"
+   REPO_NAME="micro-frontend-repo"
+   
+   # Detect container CLI
+   if command -v podman &> /dev/null; then
+       CONTAINER_CLI="podman"
+   elif command -v docker &> /dev/null; then
+       CONTAINER_CLI="docker"
+   fi
+   
+   # Build for AMD64 (this will take longer, no cache)
+   $CONTAINER_CLI build --platform linux/amd64 -t mf1-nextjs:latest mf1/
+   $CONTAINER_CLI build --platform linux/amd64 -t mf2-vuejs:latest mf2/
+   
+   # Tag images
+   $CONTAINER_CLI tag mf1-nextjs:latest ${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/mf1-nextjs:latest
+   $CONTAINER_CLI tag mf2-vuejs:latest ${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/mf2-vuejs:latest
+   
+   # Push to Artifact Registry
+   $CONTAINER_CLI push ${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/mf1-nextjs:latest
+   $CONTAINER_CLI push ${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/mf2-vuejs:latest
+   
+   # Step 3: Redeploy
+   kubectl apply -f /tmp/gke-mf1-deployment.yaml -f /tmp/gke-mf2-deployment.yaml
+   
+   # Step 4: Watch pods start up
+   kubectl get pods -w
+   # Press Ctrl+C when all pods are Running
+   
+   # Step 5: Verify all pods are running
+   kubectl get pods
+   ```
+   
+   **Expected Output After Fix:**
+   ```
+   NAME                          READY   STATUS    RESTARTS   AGE
+   mf1-nextjs-575c7c464f-xxxxx   1/1     Running   0          1m
+   mf1-nextjs-575c7c464f-yyyyy   1/1     Running   0          1m
+   mf2-vuejs-85f6fdd45f-zzzzz    1/1     Running   0          1m
+   mf2-vuejs-85f6fdd45f-wwwww    1/1     Running   0          1m
    ```
 
 ### LoadBalancer Pending
 
+LoadBalancers can take 2-5 minutes to provision external IPs.
+
 **Check service status:**
 ```bash
-kubectl describe svc mf1-nextjs-service
+# Check all services
+kubectl get svc -o wide
+
+# Watch services for IP assignment
+kubectl get svc -w
 ```
 
-**Common causes:**
-- Insufficient GCP quotas
-- Regional capacity issues
-- Firewall rules blocking
+**Expected progression:**
+```
+NAME                 TYPE           CLUSTER-IP      EXTERNAL-IP   PORT(S)        AGE
+mf1-nextjs-service   LoadBalancer   34.118.226.44   <pending>     80:32083/TCP   10s
+mf2-vuejs-service    LoadBalancer   34.118.232.64   <pending>     80:31399/TCP   8s
 
-**Wait longer (5-10 minutes) or check:**
+# After 2-5 minutes:
+NAME                 TYPE           CLUSTER-IP      EXTERNAL-IP      PORT(S)        AGE
+mf1-nextjs-service   LoadBalancer   34.118.226.44   136.111.232.97   80:32083/TCP   2m
+mf2-vuejs-service    LoadBalancer   34.118.232.64   34.172.201.38    80:31399/TCP   2m
+```
+
+**Wait for specific service IP:**
 ```bash
-gcloud compute forwarding-rules list
+# Automated wait (up to 2 minutes)
+for i in {1..12}; do
+  MF1_IP=$(kubectl get svc mf1-nextjs-service -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
+  if [ -n "$MF1_IP" ]; then
+    echo "✅ mf1-nextjs LoadBalancer IP: $MF1_IP"
+    break
+  fi
+  echo "⏳ Waiting for mf1-nextjs LoadBalancer IP... (attempt $i/12)"
+  sleep 10
+done
+
+# Repeat for mf2
+for i in {1..12}; do
+  MF2_IP=$(kubectl get svc mf2-vuejs-service -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
+  if [ -n "$MF2_IP" ]; then
+    echo "✅ mf2-vuejs LoadBalancer IP: $MF2_IP"
+    break
+  fi
+  echo "⏳ Waiting for mf2-vuejs LoadBalancer IP... (attempt $i/12)"
+  sleep 10
+done
+
+# Display access URLs
+echo ""
+echo "🌐 Access your applications:"
+echo "   Next.js: http://$MF1_IP"
+echo "   Vue.js: http://$MF2_IP"
 ```
+
+**If still pending after 10 minutes:**
+
+1. **Check service details:**
+   ```bash
+   kubectl describe svc mf1-nextjs-service
+   kubectl describe svc mf2-vuejs-service
+   ```
+
+2. **Common causes:**
+   - Insufficient GCP quotas
+   - Regional capacity issues
+   - Firewall rules blocking
+   - Billing not enabled
+
+3. **Verify forwarding rules:**
+   ```bash
+   gcloud compute forwarding-rules list
+   gcloud compute addresses list
+   ```
 
 ### Port Forwarding Not Working (Kind)
 
@@ -760,22 +926,86 @@ gcloud compute project-info describe --project=$PROJECT_ID
 
 ### Monitoring Commands
 
+**Check deployment status:**
 ```bash
-# Watch all pods
+# Watch all pods (live updates)
 kubectl get pods -w
+# Press Ctrl+C to stop watching
 
-# Stream logs
-kubectl logs -f deployment/mf1-nextjs
+# Get current pod status
+kubectl get pods
 
+# Check pod status with more details
+kubectl get pods -o wide
+
+# View recent events (troubleshooting)
+kubectl get events --sort-by='.lastTimestamp' | tail -20
+
+# Full event history
+kubectl get events --all-namespaces --sort-by='.lastTimestamp'
+```
+
+**View application logs:**
+```bash
+# Stream logs from all mf1 pods
+kubectl logs -f -l app=mf1-nextjs
+
+# Stream logs from all mf2 pods
+kubectl logs -f -l app=mf2-vuejs
+
+# Get last 20 lines of logs
+kubectl logs -l app=mf1-nextjs --tail=20
+kubectl logs -l app=mf2-vuejs --tail=20
+
+# Logs from specific pod
+kubectl logs <pod-name>
+
+# Follow logs from specific pod
+kubectl logs -f <pod-name>
+```
+
+**Check services and IPs:**
+```bash
+# List all services with IPs
+kubectl get svc
+
+# Detailed service view
+kubectl get svc -o wide
+
+# Watch services for IP changes
+kubectl get svc -w
+```
+
+**Detailed debugging:**
+```bash
 # Describe pod for detailed info
 kubectl describe pod <pod-name>
 
-# Check resource usage
+# Describe deployment
+kubectl describe deployment mf1-nextjs
+kubectl describe deployment mf2-vuejs
+
+# Describe service
+kubectl describe svc mf1-nextjs-service
+kubectl describe svc mf2-vuejs-service
+
+# Check resource usage (requires metrics-server)
 kubectl top pods
 kubectl top nodes
 
-# View cluster events
-kubectl get events --all-namespaces --sort-by='.lastTimestamp'
+# Get all resources
+kubectl get all
+```
+
+**Quick health check:**
+```bash
+# One command to check everything
+echo "=== Pods ===" && \
+kubectl get pods && \
+echo -e "\n=== Services ===" && \
+kubectl get svc && \
+echo -e "\n=== Recent Events ===" && \
+kubectl get events --sort-by='.lastTimestamp' | tail -10
 ```
 
 ---
@@ -1002,6 +1232,263 @@ kubectl port-forward pod/<pod-name> <local-port>:<container-port>
 - Create admin dashboard
 - Add more micro frontends
 - Implement module federation
+
+---
+
+## 🔄 Complete Deployment Flow (Real-World Example)
+
+This section documents the actual deployment flow with troubleshooting steps encountered:
+
+### Phase 1: Initial Deployment Attempt
+
+```bash
+# Step 1: Make script executable and verify
+chmod +x deploy-to-gke.sh
+ls -lh deploy-to-gke.sh
+
+# Step 2: Run deployment script
+PROJECT_ID="micro-gke-demo-1765441052" ./deploy-to-gke.sh
+```
+
+**Issues Encountered:**
+
+1. ❌ **SSL Certificate Error** (First run)
+   ```
+   SSLError: certificate verify failed: self-signed certificate in certificate chain
+   ```
+   - Caused by corporate proxy/firewall
+   - Resolved by switching to different network or configuring CA certs
+
+2. ❌ **Wrong Project ID** (Second run)
+   ```
+   Project 'micro-gke-demo-176544105' not found
+   ```
+   - Typo in project ID (missing digit)
+   - Fixed by listing projects and copying correct ID
+
+3. ❌ **Docker Not Found** (Third run)
+   ```
+   docker: command not found
+   ```
+   - System uses Podman, not Docker
+   - Fixed by updating script to detect container CLI
+
+### Phase 2: Project Verification
+
+```bash
+# Step 3: List all projects to find correct ID
+gcloud projects list | head -20
+
+# Output shows:
+# micro-gke-demo-1765441052   Micro Frontends Demo   804726184818    ACTIVE
+
+# Step 4: Set correct project ID
+export PROJECT_ID="micro-gke-demo-1765441052"
+echo "Project ID set to: $PROJECT_ID"
+
+# Step 5: Configure gcloud
+gcloud config set project micro-gke-demo-1765441052
+
+# Step 6: Verify project details
+gcloud projects describe micro-gke-demo-1765441052 \
+  --format="table(projectId,name,projectNumber,lifecycleState)"
+
+# Expected output:
+# PROJECT_ID                 NAME                  PROJECT_NUMBER  LIFECYCLE_STATE
+# micro-gke-demo-1765441052  Micro Frontends Demo  804726184818    ACTIVE
+
+# Step 7: Verify billing enabled (CRITICAL)
+gcloud billing projects describe micro-gke-demo-1765441052
+
+# Expected output:
+# billingEnabled: true
+# billingAccountName: billingAccounts/019076-C1BAC3-930A65
+```
+
+### Phase 3: Successful Infrastructure Deployment
+
+```bash
+# Step 8: Run deployment with verified project ID
+PROJECT_ID="micro-gke-demo-1765441052" ./deploy-to-gke.sh
+
+# Script automatically:
+# ✅ Enabled required APIs
+# ✅ Created Artifact Registry repository (micro-frontend-repo)
+# ✅ Detected Podman (not Docker)
+# ✅ Built images (cached from local builds - ARM64)
+# ✅ Pushed images to Artifact Registry (~74MB mf1, ~23MB mf2)
+# ✅ Created GKE cluster (2 nodes, e2-medium, ~3 minutes)
+# ✅ Generated deployment manifests
+# ✅ Deployed to GKE
+# ❌ Pods failed with CrashLoopBackOff
+```
+
+### Phase 4: Debugging Pod Failures
+
+```bash
+# Step 9: Check pod status
+kubectl get pods
+
+# Output:
+# NAME                          READY   STATUS             RESTARTS       AGE
+# mf1-nextjs-575c7c464f-qdvw7   0/1     CrashLoopBackOff   5 (110s ago)   5m21s
+# mf1-nextjs-575c7c464f-s6xzq   0/1     CrashLoopBackOff   5 (2m9s ago)   5m21s
+# mf2-vuejs-85f6fdd45f-gwmkv    0/1     CrashLoopBackOff   5 (114s ago)   5m19s
+# mf2-vuejs-85f6fdd45f-qnfzg    0/1     CrashLoopBackOff   5 (101s ago)   5m19s
+
+# Step 10: Check events
+kubectl get events --sort-by='.lastTimestamp' | tail -20
+
+# Shows: "Back-off restarting failed container"
+
+# Step 11: Check logs for error messages
+kubectl logs -l app=mf1-nextjs --tail=20
+kubectl logs -l app=mf2-vuejs --tail=20
+
+# Output:
+# exec /usr/local/bin/docker-entrypoint.sh: exec format error
+# exec /docker-entrypoint.sh: exec format error
+```
+
+**Root Cause Identified**: ARM64 images built on Apple Silicon Mac won't run on AMD64 GKE nodes
+
+### Phase 5: Architecture Fix and Redeployment
+
+```bash
+# Step 12: Delete failed deployments
+kubectl delete -f /tmp/gke-mf1-deployment.yaml -f /tmp/gke-mf2-deployment.yaml
+
+# Step 13: Rebuild images for AMD64 architecture
+PROJECT_ID="micro-gke-demo-1765441052"
+REGION="us-central1"
+REPO_NAME="micro-frontend-repo"
+
+# Build with platform flag (cross-compilation)
+podman build --platform linux/amd64 -t mf1-nextjs:latest mf1/
+podman build --platform linux/amd64 -t mf2-vuejs:latest mf2/
+
+# Note: Build takes longer without ARM64 cache
+
+# Step 14: Tag for Artifact Registry
+podman tag mf1-nextjs:latest \
+  ${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/mf1-nextjs:latest
+podman tag mf2-vuejs:latest \
+  ${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/mf2-vuejs:latest
+
+# Step 15: Push to Artifact Registry
+podman push ${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/mf1-nextjs:latest
+podman push ${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/mf2-vuejs:latest
+
+# Step 16: Redeploy with correct images
+kubectl apply -f /tmp/gke-mf1-deployment.yaml -f /tmp/gke-mf2-deployment.yaml
+
+# Output:
+# deployment.apps/mf1-nextjs created
+# service/mf1-nextjs-service created
+# deployment.apps/mf2-vuejs created
+# service/mf2-vuejs-service created
+```
+
+### Phase 6: Verification and Success
+
+```bash
+# Step 17: Watch pods start (live monitoring)
+kubectl get pods -w
+# Press Ctrl+C after all pods are Running (~30 seconds)
+
+# Step 18: Verify all pods running
+kubectl get pods
+
+# Output:
+# NAME                          READY   STATUS    RESTARTS   AGE
+# mf1-nextjs-575c7c464f-2zpcp   1/1     Running   0          26s
+# mf1-nextjs-575c7c464f-5rhtp   1/1     Running   0          26s
+# mf2-vuejs-85f6fdd45f-h9kr6    1/1     Running   0          25s
+# mf2-vuejs-85f6fdd45f-wjfnf    1/1     Running   0          25s
+
+# Step 19: Check LoadBalancer IPs
+kubectl get svc -o wide
+
+# Initial output:
+# NAME                 TYPE           CLUSTER-IP      EXTERNAL-IP      PORT(S)        AGE
+# mf1-nextjs-service   LoadBalancer   34.118.226.44   136.111.232.97   80:32083/TCP   33s
+# mf2-vuejs-service    LoadBalancer   34.118.232.64   <pending>        80:31399/TCP   31s
+
+# Step 20: Wait for second LoadBalancer IP
+for i in {1..12}; do
+  MF2_IP=$(kubectl get svc mf2-vuejs-service -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
+  if [ -n "$MF2_IP" ]; then
+    echo "✅ mf2-vuejs LoadBalancer IP: $MF2_IP"
+    break
+  fi
+  echo "⏳ Waiting for mf2-vuejs LoadBalancer IP... (attempt $i/12)"
+  sleep 10
+done
+
+# Output after ~10 seconds:
+# ✅ mf2-vuejs LoadBalancer IP: 34.172.201.38
+```
+
+### Phase 7: Deployment Success Summary
+
+```bash
+# Display final status
+cat << 'EOF'
+
+╔══════════════════════════════════════════════════════════════╗
+║          🎉 GKE DEPLOYMENT SUCCESSFUL! 🎉                    ║
+╚══════════════════════════════════════════════════════════════╝
+
+📍 Application URLs:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Next.js Landing Page (mf1):
+  🌐 http://136.111.232.97
+
+  Vue.js Blog Listing (mf2):
+  🌐 http://34.172.201.38
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+✅ All pods running (4 pods total)
+✅ LoadBalancers provisioned (2 external IPs)
+✅ External IPs assigned
+✅ Applications accessible via public internet
+
+📊 Deployment Statistics:
+   Total Time: ~15 minutes (including debugging)
+   Cluster Creation: ~3 minutes
+   Image Build (AMD64): ~2 minutes
+   LoadBalancer Provisioning: ~30 seconds
+   
+💡 Key Lessons:
+   1. Always verify project ID before deployment
+   2. Use --platform linux/amd64 for GKE on Apple Silicon
+   3. Check pod logs immediately if CrashLoopBackOff occurs
+   4. LoadBalancer IPs may provision at different rates
+   5. Podman works perfectly as Docker replacement
+
+EOF
+```
+
+### Timeline Summary
+
+| Time | Action | Result |
+|------|--------|--------|
+| T+0m | Run deployment script | ❌ SSL error (network issue) |
+| T+1m | Retry with correct network | ❌ Wrong project ID |
+| T+2m | Fix project ID | ❌ Docker not found |
+| T+3m | Verify project, list all | ✅ Found correct ID |
+| T+4m | Configure gcloud | ✅ Project verified |
+| T+5m | Verify billing | ✅ Billing enabled |
+| T+6m | Run deployment script | ✅ Infrastructure created |
+| T+9m | Cluster creation complete | ✅ 2-node cluster ready |
+| T+10m | Images pushed, pods deployed | ❌ Pods crash (ARM64→AMD64) |
+| T+11m | Check logs, identify issue | 🔍 Exec format error found |
+| T+12m | Delete deployments | ✅ Cleanup complete |
+| T+13m | Rebuild for AMD64 | ✅ Cross-compilation success |
+| T+14m | Push images, redeploy | ✅ Pods running |
+| T+15m | LoadBalancers ready | ✅ **DEPLOYMENT COMPLETE** |
 
 ---
 
