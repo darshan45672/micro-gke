@@ -14,6 +14,9 @@ WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 
+# Copy production environment file for build-time variables
+COPY .env.production .env.production
+
 # Set environment variable to enable standalone output
 ENV NEXT_TELEMETRY_DISABLED=1
 

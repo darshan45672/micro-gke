@@ -15,7 +15,7 @@ export default function Home() {
         
         <div className="flex flex-col gap-4 mt-8">
           <a
-            href="http://localhost:5173"
+            href={process.env.NEXT_PUBLIC_BLOG_URL || "http://localhost:5173"}
             target="_blank"
             rel="noopener noreferrer"
             className="px-8 py-4 text-lg font-semibold text-white bg-blue-600 rounded-lg shadow-lg hover:bg-blue-700 transition-all duration-200 hover:shadow-xl hover:scale-105"
@@ -23,7 +23,7 @@ export default function Home() {
             View Blogs →
           </a>
           <p className="text-sm text-gray-500 dark:text-gray-400">
-            Opens Vue.js micro frontend on port 5173
+            Opens Vue.js micro frontend
           </p>
         </div>
 

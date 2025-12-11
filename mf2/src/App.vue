@@ -19,7 +19,7 @@ interface BlogPost {
 }
 
 const navigateToLanding = () => {
-  window.location.href = 'http://localhost:3000'
+  window.location.href = import.meta.env.VITE_LANDING_URL || 'http://localhost:3000'
 }
 
 const blogs = ref<BlogPost[]>([
