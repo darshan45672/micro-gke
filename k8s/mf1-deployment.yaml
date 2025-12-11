@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mf1-nextjs
+  labels:
+    app: mf1-nextjs
+    tier: frontend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: mf1-nextjs
+  template:
+    metadata:
+      labels:
+        app: mf1-nextjs
+        tier: frontend
+    spec:
+      containers:
+      - name: mf1-nextjs
+        image: gcr.io/micro-gke-demo-1765441052/mf1-nextjs:latest
+        ports:
+        - containerPort: 3000
+          name: http
+        env:
+        - name: NODE_ENV
+          value: "production"
+        - name: PORT
+          value: "3000"
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 3000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 3000
+          initialDelaySeconds: 5
+          periodSeconds: 5

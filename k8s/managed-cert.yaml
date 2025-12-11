@@ -1,0 +1,8 @@
+apiVersion: networking.gke.io/v1
+kind: ManagedCertificate
+metadata:
+  name: micro-frontends-cert
+spec:
+  domains:
+    - YOUR_DOMAIN.com
+    - www.YOUR_DOMAIN.com
