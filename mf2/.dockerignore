@@ -1,0 +1,14 @@
+Dockerfile
+.dockerignore
+node_modules
+npm-debug.log
+README.md
+.git
+.gitignore
+.gitattributes
+.editorconfig
+.vscode
+dist
+.eslintrc*
+.prettierrc*
+*.md
