@@ -66,9 +66,12 @@ micro-gke/
 │   ├── mf1-deployment.yaml
 │   ├── mf2-deployment.yaml
 │   └── ingress.yaml
-├── build-and-deploy.sh     # Automated deployment script
-├── update-urls.sh          # Update app URLs for k8s
-└── README-k8s.md          # Detailed k8s guide
+├── build-and-deploy.sh     # Local K8s deployment (Kind/Minikube)
+├── deploy-to-gke.sh        # GKE deployment script
+├── start-port-forward.sh   # Port forwarding (Kind only)
+├── stop-port-forward.sh    # Stop port forwarding
+├── README-k8s.md          # Local K8s deployment guide
+└── README-GKE.md          # Google Kubernetes Engine guide
 ```
 
 ## 🚀 Quick Start
@@ -164,6 +167,27 @@ kubectl delete -f k8s/
 
 **For detailed manual steps:** See [README-k8s.md](./README-k8s.md)  
 **For quick reference:** See [QUICKSTART.md](./QUICKSTART.md)
+
+### Deploy to Google Kubernetes Engine (GKE)
+
+For production deployment to Google Cloud:
+
+```bash
+# Set your Google Cloud project ID
+export PROJECT_ID="your-project-id"
+
+# Run automated GKE deployment
+./deploy-to-gke.sh
+```
+
+This will:
+1. Create Artifact Registry repository
+2. Build and push images to Google Cloud
+3. Create/use existing GKE cluster
+4. Deploy applications with LoadBalancer services
+5. Display public IP addresses
+
+**For complete GKE guide:** See [README-GKE.md](./README-GKE.md)
 
 ## 🔧 Configuration
 
